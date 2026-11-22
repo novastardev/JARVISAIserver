@@ -1619,7 +1619,7 @@ function getMemoryConversationKey(chatJid, userJid) {
     return `${String(chatJid || 'unknown-chat')}::${String(userJid || 'unknown-user')}`;
 }
 
-async function getConversationContext(chatJid, userJid, limit = 12) {
+async function getConversationContext(chatJid, userJid, limit = 12, maxChars = 6000) {
     try {
         if (mongoose.connection.readyState !== 1 || !chatJid || !userJid) return '';
         const conversationKey = getMemoryConversationKey(chatJid, userJid);
@@ -1628,9 +1628,19 @@ async function getConversationContext(chatJid, userJid, limit = 12) {
             .limit(Math.max(2, Math.min(Number(limit) || 12, 20)))
             .lean();
         if (!messages.length) return '';
-        return messages.reverse().map(item =>
-            `${item.role === 'assistant' ? 'JARVIS' : 'USER'}: ${item.content}`
+        messages.reverse();
+        // Budget the context: recent turns win. Drop oldest lines until under maxChars
+        // so oversized group messages never blow up the prompt and stall the LLM.
+        let total = messages.reduce((sum, msg) => sum + (msg.content || '').length + 12, 0);
+        while (total > maxChars && messages.length > 2) {
+            total -= (messages[0].content || '').length + 12;
+            messages.shift();
+        }
+        let context = messages.map(item =>
+            `${item.role === 'assistant' ? 'JARVIS' : 'USER'}: ${(item.content || '').slice(0, 800)}`
         ).join('\n');
+        if (context.length > maxChars) context = context.slice(-maxChars);
+        return context;
     } catch (err) {
         console.log('⚠️ Memory read error:', err.message);
         return '';
@@ -1684,36 +1694,46 @@ async function clearAISession(chatJid) {
 
 // JARVIS response policy. This is prepended to every AI request so the
 // assistant keeps the same identity, tone and response style across sessions.
-const JARVIS_SYSTEM_PROMPT = `You are JARVIS, an intelligent AI assistant developed by Flexi Educational Consult.
+const JARVIS_SYSTEM_PROMPT = `You are JARVIS, a sharp, warm AI assistant built by Flexi Educational Consult — think capable friend, not call-centre bot.
 
-IDENTITY AND INTRODUCTIONS:
-- Your name is JARVIS. If someone asks your name, who you are, or what they should call you, answer naturally and confidently. Example: "I'm JARVIS, your AI assistant." Adapt the wording to the conversation.
-- Never introduce yourself unless the user asks or an introduction is genuinely relevant.
-- Never begin every response with "🤖 JARVIS AI", "JARVIS AI", "Greetings", "Hello, I am JARVIS", or a repeated greeting.
-- Do not add a JARVIS heading, branding banner, signature, or footer to ordinary answers.
+IDENTITY:
+- Your name is JARVIS. If asked who you are, answer naturally: "I'm JARVIS 😄" — never recite a bio unless asked.
+- Never open every reply with a greeting or "🤖 JARVIS AI". No headings, banners, signatures or footers.
+- Never introduce yourself unless asked or genuinely relevant.
 
-RESPONSE LENGTH AND STYLE:
-- Be concise, clear and direct by default. Answer the actual question first.
-- Use short paragraphs and avoid unnecessary introductions, repetition and filler.
-- Give detailed explanations, notes, examples or step-by-step instructions when the user asks for detail or the task genuinely requires it.
-- Do not make an answer so short that important information is lost.
-- Match the user's tone naturally while remaining respectful and accurate.
+PERSONALITY AND TONE:
+- Friendly, confident, lightly playful. A well-placed emoji is fine; emoji soup is not (max 1-2 per reply).
+- Mirror the user's energy: casual chat gets casual replies; serious questions get serious, precise answers.
+- Match the user's language: reply in Nigerian Pidgin, Yoruba, Hausa, or any language they use, naturally and correctly. If they write in English, reply in English.
+
+WHATSAPP FORMATTING (critical):
+- WhatsApp is NOT markdown. Never use **double asterisks**, # headings, or [links](url) syntax.
+- Bold = *single asterisks*, italics = _underscores_, code = \`\`\`backticks\`\`\`.
+- Keep replies scannable: short lines, blank lines between thoughts, bullets with • or - when listing.
+
+MEMORY (you have it — use it):
+- Recent conversation is provided below. Actively use remembered details: names, preferences, earlier questions, what you already answered.
+- If the user references something earlier, connect it — never ask them to repeat known info.
+- Do not re-answer questions you already answered in the recent conversation unless corrected or asked again.
+
+RESPONSE LENGTH:
+- Shortest useful answer by default. Answer the actual question in the first line, then expand only if needed.
+- Give step-by-step detail only when asked or when the task genuinely requires it.
+- In groups, be even tighter — long messages get skipped.
 
 UNDERSTANDING:
-- Understand natural language, Nigerian English, Pidgin, informal expressions, abbreviations, typos and differently worded requests.
-- Use the recent conversation to understand references and follow-up questions. Do not ask users to repeat information already provided.
-- Distinguish ordinary questions from requests to perform an action.
-- If a request is ambiguous and the missing detail matters, ask one brief clarification question.
-- Never claim that you executed a command, accessed an account, changed a setting or completed an action unless the available system actually did it.
+- Handle Nigerian English, Pidgin, slang, abbreviations, typos and indirect phrasing without complaint.
+- Distinguish questions from action requests. If ambiguous and the missing detail matters, ask ONE brief clarification.
+- Never claim you executed a command, accessed an account, changed a setting or completed an action unless the system actually did it.
 
-COMMANDS AND CAPABILITIES:
-- When the user describes an existing JARVIS command in ordinary language, understand the intended command and explain or route it only through functionality actually available to the application.
-- Do not invent commands, tools, integrations, results or permissions.
-- If a task requires a command handler or external tool that is not available to you, say so briefly and tell the user the supported command or next step when known.
+CAPABILITIES AND HONESTY:
+- Route command-like requests only through functionality that actually exists. Never invent commands, tools, integrations, results or permissions.
+- If something needs a handler you don't have, say so briefly and mention the supported command or next step when known.
+- Be honest about uncertainty. For educational questions, explain at the user's level with worked steps when useful.
 
-ACCURACY:
-- Be honest about uncertainty and limitations.
-- For educational questions, explain at the level the user requests and include worked steps when useful.
+CORE RULE: shortest useful answer, right personality, zero hallucination.
+
+
 - Use headings, lists and emojis only when they improve readability. Avoid excessive formatting.
 
 CORE RULE: Give the shortest useful answer by default, and expand when the user asks for more.`;
@@ -5444,19 +5464,23 @@ const admin = require("firebase-admin");
 // Initialize Firebase ONLY ONCE
 if (!admin.apps.length) {
 
-    const serviceAccount = JSON.parse(
-        process.env.FIREBASE_SERVICE_ACCOUNT
-    );
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        const serviceAccount = JSON.parse(
+            process.env.FIREBASE_SERVICE_ACCOUNT
+        );
 
-    admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
-    });
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
 
-    console.log("✅ Firebase Connected");
+        console.log("✅ Firebase Connected");
+    } else {
+        console.warn("⚠️ FIREBASE_SERVICE_ACCOUNT not set — Firebase-dependent features disabled.");
+    }
 }
 
-// Firestore Database Instance
-const db = admin.firestore();
+// Firestore Database Instance (null-safe: features guard on db existing)
+const db = admin.apps.length ? admin.firestore() : null;
 
 // ===============================
 // PHONE NORMALIZER

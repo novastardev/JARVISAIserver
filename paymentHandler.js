@@ -39,7 +39,7 @@ if (admin.apps.length === 0) {
     }
 }
 
-db = admin.firestore();
+db = admin.apps.length ? admin.firestore() : null;
 
 // ===============================
 // PAYMENT SERVER URL

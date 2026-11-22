@@ -1,0 +1,2 @@
+{"timestamp":"2026-11-21T18:28:14.176Z","type":"tool.failure","actor":"232487250833616@lid","tool":"github_list_repositories","durationMs":1,"error":"GITHUB_TOKEN is not configured"}
+{"timestamp":"2026-11-21T18:38:51.035Z","type":"tool.failure","actor":"232487250833616@lid","tool":"github_list_repositories","durationMs":0,"error":"GITHUB_TOKEN is not configured"}
