@@ -11,6 +11,7 @@ const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const express = require('express');
 const mongoose = require('mongoose');
+const { connectDatabase, closeDatabase } = require('./database');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -83,7 +84,7 @@ const PIPER_DOCUMENT_TIMEOUT_MS = Math.max(10000, Number(process.env.PIPER_DOCUM
 
 // Tracks the latest generated video per chat so !video status needs no ID.
 const latestMagicHourVideoByChat = new Map();
-if (!MONGO_URI) console.warn('⚠️ MONGO_URI is not set. Configure it in your hosting environment.');
+
 if (!AI_API_KEY) console.warn('⚠️ AI_API_KEY is not set. JARVIS cannot authenticate to the AI Link until configured.');
 
 const firebaseConfig = {
@@ -1495,11 +1496,28 @@ async function sendAIReply(jid, text, quotedMessage = null) {
     }
 }
 
-if (MONGO_URI) {
-    mongoose.connect(MONGO_URI)
-        .then(() => { console.log('✅ MongoDB Connected'); startReminderWorker(); })
-        .catch(err => console.log('❌ DB Error:', err.message));
+let databaseRuntime = null;
+
+connectDatabase({ mongoose, mongoUri: MONGO_URI })
+    .then(runtime => {
+        databaseRuntime = runtime;
+        startReminderWorker();
+    })
+    .catch(err => {
+        console.error('❌ Database startup failed:', err.message);
+    });
+
+async function shutdownDatabase(signal) {
+    console.log(`Received ${signal}; closing database connection.`);
+    try {
+        await closeDatabase({ mongoose, embeddedServer: databaseRuntime?.embeddedServer });
+    } catch (error) {
+        console.error('Database shutdown error:', error.message);
+    }
 }
+
+process.once('SIGTERM', () => shutdownDatabase('SIGTERM').finally(() => process.exit(0)));
+process.once('SIGINT', () => shutdownDatabase('SIGINT').finally(() => process.exit(0)));
 
 
 // --- AUTHENTICATED AI GATEWAY ---
